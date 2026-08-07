@@ -1,20 +1,27 @@
-# fly.toml — cấu hình cho app Fly.io
-# Chạy `fly launch` lần đầu sẽ tự sinh app name; sau đó có thể chỉnh sửa file này.
+# fly.toml app configuration file generated for srbot-ctuowngf on 2026-08-07T17:25:41+07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "srbot-CHANGE-ME"   # đổi thành tên app duy nhất của m
-primary_region = "sin"    # Singapore — gần VN nhất
+app = 'srbot-ctuowngf'
+primary_region = 'sin'
 
 [build]
-
-[mounts]
-  source = "srbot_data"
-  destination = "/data"
-
 [env]
-  DB_PATH = "/data/srbot.db"
+  DB_PATH = '/data/srbot.db'
 
-# Bot dùng long-polling (không nhận HTTP request), nên không cần mở port / http_service.
-# Fly vẫn cần 1 process chạy liên tục -> dùng "vm" thường, không auto-stop.
+[[mounts]]
+  source = 'srbot_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "256mb"
+  size = 'shared-cpu-1x'
+  memory = '256mb'
