@@ -1,0 +1,20 @@
+# fly.toml — cấu hình cho app Fly.io
+# Chạy `fly launch` lần đầu sẽ tự sinh app name; sau đó có thể chỉnh sửa file này.
+
+app = "srbot-CHANGE-ME"   # đổi thành tên app duy nhất của m
+primary_region = "sin"    # Singapore — gần VN nhất
+
+[build]
+
+[mounts]
+  source = "srbot_data"
+  destination = "/data"
+
+[env]
+  DB_PATH = "/data/srbot.db"
+
+# Bot dùng long-polling (không nhận HTTP request), nên không cần mở port / http_service.
+# Fly vẫn cần 1 process chạy liên tục -> dùng "vm" thường, không auto-stop.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
