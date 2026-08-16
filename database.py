@@ -69,6 +69,18 @@ def init_db():
                 reminder_hour INTEGER NOT NULL DEFAULT 7,
                 reminder_minute INTEGER NOT NULL DEFAULT 0
             );
+
+            -- Ánh xạ số hiển thị (R1, R2, A1, A2...) -> id thật trong review_items/assignments.
+            -- Được ghi đè lại MỖI LẦN /homnay, /tuan, /list (hoặc nhắc tự động) chạy, theo đúng
+            -- thứ tự đang hiển thị trên màn hình lúc đó. Mục đích: số luôn nhỏ, gọn, không phụ
+            -- thuộc vào id AUTOINCREMENT tăng vô hạn theo thời gian.
+            CREATE TABLE IF NOT EXISTS display_refs (
+                chat_id INTEGER NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('R', 'A')),
+                ref_number INTEGER NOT NULL,
+                real_id INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, kind, ref_number)
+            );
             """
         )
 
@@ -189,6 +201,35 @@ def delete_assignment(assignment_id: int, chat_id: int) -> bool:
             "DELETE FROM assignments WHERE id = ? AND chat_id = ?", (assignment_id, chat_id)
         )
         return cur.rowcount > 0
+
+
+# ---------- Display refs (số hiển thị R1/A1... -> id thật) ----------
+
+def refresh_display_refs(chat_id: int, reviews, assignments):
+    """Ghi đè mapping số hiển thị cho 1 chat_id, theo đúng thứ tự truyền vào
+    (reviews/assignments đã được sort theo due_date/deadline_date từ trước).
+    Gọi mỗi khi build 1 danh sách mới (/homnay, /tuan, /list, nhắc tự động)."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM display_refs WHERE chat_id = ?", (chat_id,))
+        conn.executemany(
+            "INSERT INTO display_refs (chat_id, kind, ref_number, real_id) VALUES (?, 'R', ?, ?)",
+            [(chat_id, i, r["id"]) for i, r in enumerate(reviews, start=1)],
+        )
+        conn.executemany(
+            "INSERT INTO display_refs (chat_id, kind, ref_number, real_id) VALUES (?, 'A', ?, ?)",
+            [(chat_id, i, a["id"]) for i, a in enumerate(assignments, start=1)],
+        )
+
+
+def resolve_display_ref(chat_id: int, kind: str, ref_number: int):
+    """Trả về id thật tương ứng với số hiển thị (kind='R'|'A'), hoặc None nếu
+    mapping không tồn tại (list đã cũ, đã bị ghi đè bởi lần list khác)."""
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT real_id FROM display_refs WHERE chat_id = ? AND kind = ? AND ref_number = ?",
+            (chat_id, kind, ref_number),
+        ).fetchone()
+        return row["real_id"] if row else None
 
 
 # ---------- Settings (giờ nhắc + chat_id) ----------

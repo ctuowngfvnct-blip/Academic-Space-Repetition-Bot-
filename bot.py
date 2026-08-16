@@ -8,8 +8,8 @@ Lệnh chính:
   /homnay                         - liệt kê những gì đến hạn hôm nay (kể cả quá hạn)
   /tuan                           - liệt kê những gì đến hạn trong 7 ngày tới
   /list                           - liệt kê TẤT CẢ việc đang chờ (chưa hoàn thành)
-  /xong <R12 | A5>                - đánh dấu hoàn thành review #12 hoặc assignment #5
-  /huy <R12 | A5>                 - xoá 1 mục
+  /xong <R2 | A1>                 - đánh dấu hoàn thành, số lấy từ /homnay|/tuan|/list gần nhất
+  /huy <R2 | A1>                  - xoá 1 mục, số lấy từ /homnay|/tuan|/list gần nhất
   /giobao <HH:MM>                 - đặt giờ nhận nhắc mỗi ngày (mặc định 07:00)
   /help                           - hướng dẫn
 """
@@ -43,20 +43,23 @@ def today() -> date:
     return datetime.now(TZ).date()
 
 
-def fmt_review_line(row) -> str:
+def fmt_review_line(row, ref_number: int) -> str:
     overdue = " ⚠️ QUÁ HẠN" if row["due_date"] < today().isoformat() else ""
-    return f"  R{row['id']} • {row['subject']} - {row['topic']} (lần {row['round_number']}/5, hạn {row['due_date']}){overdue}"
+    return f"  R{ref_number} • {row['subject']} - {row['topic']} (lần {row['round_number']}/5, hạn {row['due_date']}){overdue}"
 
 
-def fmt_assignment_line(row) -> str:
+def fmt_assignment_line(row, ref_number: int) -> str:
     overdue = " ⚠️ QUÁ HẠN" if row["deadline_date"] < today().isoformat() else ""
     subj = f" [{row['subject']}]" if row["subject"] else ""
-    return f"  A{row['id']} • {row['name']}{subj} (hạn {row['deadline_date']}){overdue}"
+    return f"  A{ref_number} • {row['name']}{subj} (hạn {row['deadline_date']}){overdue}"
 
 
 def build_due_message(chat_id: int, up_to: date, header: str) -> str:
     reviews = db.get_due_reviews(chat_id, up_to)
     assignments = db.get_due_assignments(chat_id, up_to)
+    # Đánh số lại R1, R2... / A1, A2... theo đúng thứ tự hiển thị dưới đây.
+    # /xong và /huy sẽ dùng đúng mapping của lần liệt kê gần nhất này.
+    db.refresh_display_refs(chat_id, reviews, assignments)
 
     if not reviews and not assignments:
         return f"{header}\n\n✅ Không có gì đến hạn. Nghỉ ngơi thôi!"
@@ -64,13 +67,16 @@ def build_due_message(chat_id: int, up_to: date, header: str) -> str:
     parts = [header, ""]
     if reviews:
         parts.append("📚 Cần ôn tập:")
-        parts.extend(fmt_review_line(r) for r in reviews)
+        parts.extend(fmt_review_line(r, i) for i, r in enumerate(reviews, start=1))
         parts.append("")
     if assignments:
         parts.append("📝 Bài tập / deadline:")
-        parts.extend(fmt_assignment_line(a) for a in assignments)
+        parts.extend(fmt_assignment_line(a, i) for i, a in enumerate(assignments, start=1))
 
-    parts.append("\nDùng /xong R<id> hoặc /xong A<id> để đánh dấu hoàn thành.")
+    parts.append(
+        "\nDùng /xong R<số> hoặc /xong A<số> để đánh dấu hoàn thành "
+        "(số ứng với danh sách vừa hiện — nếu list đã cũ, gõ lại /homnay hoặc /list trước)."
+    )
     return "\n".join(parts)
 
 
@@ -155,17 +161,18 @@ async def tuan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     reviews, assignments = db.list_all_pending(chat_id)
+    db.refresh_display_refs(chat_id, reviews, assignments)
     if not reviews and not assignments:
         await update.message.reply_text("Hiện không có review hay bài tập nào đang chờ.")
         return
     parts = ["📋 Toàn bộ việc đang chờ:", ""]
     if reviews:
         parts.append("📚 Ôn tập:")
-        parts.extend(fmt_review_line(r) for r in reviews)
+        parts.extend(fmt_review_line(r, i) for i, r in enumerate(reviews, start=1))
         parts.append("")
     if assignments:
         parts.append("📝 Bài tập:")
-        parts.extend(fmt_assignment_line(a) for a in assignments)
+        parts.extend(fmt_assignment_line(a, i) for i, a in enumerate(assignments, start=1))
     await update.message.reply_text("\n".join(parts))
 
 
@@ -177,20 +184,33 @@ def _parse_ref(ref: str):
     return ref[0], int(ref[1:])
 
 
+def _resolve_ref_or_none(chat_id: int, kind: str, ref_number: int):
+    """Tra số hiển thị (R1/A1...) từ lần /homnay|/tuan|/list gần nhất -> id thật.
+    None nếu mapping không còn (đã bị ghi đè bởi lần list khác, hoặc ref không hợp lệ)."""
+    return db.resolve_display_ref(chat_id, kind, ref_number)
+
+
 async def xong(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not context.args:
         await update.message.reply_text("Cú pháp: /xong R12  hoặc  /xong A5")
         return
-    kind, item_id = _parse_ref(context.args[0])
+    kind, ref_number = _parse_ref(context.args[0])
     if kind is None:
         await update.message.reply_text("Không nhận dạng được ID. Dùng dạng R12 (review) hoặc A5 (assignment).")
         return
-    ok = db.mark_review_done(item_id, chat_id) if kind == "R" else db.mark_assignment_done(item_id, chat_id)
+    real_id = _resolve_ref_or_none(chat_id, kind, ref_number)
+    if real_id is None:
+        await update.message.reply_text(
+            "Không tìm thấy mục này trong danh sách vừa hiện. "
+            "Có thể list đã cũ — gõ /homnay hoặc /list rồi thử lại."
+        )
+        return
+    ok = db.mark_review_done(real_id, chat_id) if kind == "R" else db.mark_assignment_done(real_id, chat_id)
     if ok:
         await update.message.reply_text(f"✅ Đã đánh dấu hoàn thành {context.args[0].upper()}.")
     else:
-        await update.message.reply_text("Không tìm thấy mục này (hoặc đã hoàn thành trước đó).")
+        await update.message.reply_text("Mục này đã hoàn thành trước đó rồi.")
 
 
 async def huy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -198,11 +218,18 @@ async def huy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Cú pháp: /huy R12  hoặc  /huy A5")
         return
-    kind, item_id = _parse_ref(context.args[0])
+    kind, ref_number = _parse_ref(context.args[0])
     if kind is None:
         await update.message.reply_text("Không nhận dạng được ID.")
         return
-    ok = db.delete_review(item_id, chat_id) if kind == "R" else db.delete_assignment(item_id, chat_id)
+    real_id = _resolve_ref_or_none(chat_id, kind, ref_number)
+    if real_id is None:
+        await update.message.reply_text(
+            "Không tìm thấy mục này trong danh sách vừa hiện. "
+            "Có thể list đã cũ — gõ /homnay hoặc /list rồi thử lại."
+        )
+        return
+    ok = db.delete_review(real_id, chat_id) if kind == "R" else db.delete_assignment(real_id, chat_id)
     if ok:
         await update.message.reply_text(f"🗑️ Đã xoá {context.args[0].upper()}.")
     else:
